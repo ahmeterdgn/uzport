@@ -5,6 +5,7 @@ import PortCore
 
 struct PanelView: View {
     @EnvironmentObject var store: PortStore
+    @EnvironmentObject var pm: ProcessManager
     @State private var contentHeight: CGFloat = 300
 
     var body: some View {
@@ -16,7 +17,13 @@ struct PanelView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     PortLookup()
                     let dev = store.visible(.dev)
-                    if dev.isEmpty && store.query.isEmpty {
+                    let pending = pm.servers.filter { s in !store.items.contains { $0.managedID == s.id } }
+                    if !pending.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(pending) { s in ManagedRow(server: s) }
+                        }
+                    }
+                    if dev.isEmpty && pending.isEmpty && store.query.isEmpty && pm.projects.isEmpty {
                         EmptyDev()
                     }
                     ForEach(PortCategory.allCases, id: \.self) { c in
@@ -24,6 +31,7 @@ struct PanelView: View {
                         if !list.isEmpty {
                             SectionView(category: c, items: list)
                         }
+                        if c == .dev { LaunchSection() }
                     }
                 }
                 .padding(12)
@@ -84,6 +92,19 @@ struct SettingsMenu: View {
             Toggle(L("macOS sistem portlarını göster", "Show macOS system ports"), isOn: $store.showSystem)
             Toggle(L("Yeni sunucu başlayınca bildir", "Notify when a dev server starts"), isOn: $store.notify)
             Toggle(L("Girişte başlat", "Launch at login"), isOn: Binding(get: { store.launchAtLogin }, set: { store.launchAtLogin = $0 }))
+            Toggle(L("Çöken sunucuyu yeniden başlat", "Auto-restart crashed servers"), isOn: $store.autoRestart)
+            Divider()
+            Menu(L("Proje klasörleri", "Project folders")) {
+                ForEach(ProcessManager.shared.roots, id: \.self) { r in
+                    Button(L("Kaldır: ", "Remove: ") + (r as NSString).abbreviatingWithTildeInPath) {
+                        ProcessManager.shared.roots.removeAll { $0 == r }
+                    }
+                }
+                Divider()
+                Button(L("Klasör ekle…", "Add folder…")) { addProjectFolder() }
+                Button(L("Projeleri yeniden tara", "Rescan projects")) { ProcessManager.shared.rescanProjects() }
+            }
+            Text(L("Kısayol: ⌃⌥P paneli açar", "Shortcut: ⌃⌥P opens the panel"))
             Divider()
             Picker(L("Dil", "Language"), selection: Binding(get: { Lang.code }, set: { store.setLanguage($0) })) {
                 Text("Türkçe").tag("tr")
@@ -202,7 +223,10 @@ struct SectionView: View {
 
 struct PortRow: View {
     @EnvironmentObject var store: PortStore
+    @EnvironmentObject var pm: ProcessManager
+    @Environment(\.openWindow) private var openWindow
     let item: PortItem
+    var managed: ManagedServer? { item.managedID.flatMap { id in pm.servers.first { $0.id == id } } }
     @State private var hover = false
     @State private var showQR = false
 
@@ -236,6 +260,9 @@ struct PortRow: View {
                 }
                 HStack(spacing: 5) {
                     Chip(text: item.dockerImage ?? item.cls.kind.name, color: kindColor)
+                    if managed != nil {
+                        Chip(text: "UzPort", symbol: "play.fill", color: Theme.accent).help(L("UzPort tarafından başlatıldı", "Started by UzPort"))
+                    }
                     Text(subtitle).font(.system(size: 10.5)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.tail)
                 }
             }
@@ -291,10 +318,14 @@ struct PortRow: View {
                 IconButton(symbol: "qrcode", help: L("Telefonda aç (QR)", "Open on phone (QR)")) { showQR.toggle() }
                     .popover(isPresented: $showQR, arrowEdge: .bottom) { QRCard(item: item) }
             }
-            if item.cls.projectPath != nil {
+            if let m = managed {
+                IconButton(symbol: "text.alignleft", help: L("Loglar", "Logs")) { openLogs(m, openWindow) }
+                IconButton(symbol: "arrow.clockwise", help: L("Yeniden başlat", "Restart")) { pm.restart(m) }
+                IconButton(symbol: "stop.fill", tint: Theme.red, help: L("Durdur", "Stop")) { pm.stop(m) }
+            } else if item.cls.projectPath != nil {
                 IconButton(symbol: "folder", help: L("Klasörü göster", "Show folder")) { store.reveal(item) }
             }
-            if item.canKill {
+            if item.canKill && managed == nil {
                 Button { store.kill(item) } label: {
                     Group {
                         if store.armedKill == item.id {
@@ -418,4 +449,19 @@ enum Fmt {
 struct ContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+@MainActor
+func addProjectFolder() {
+    NSApp.activate(ignoringOtherApps: true)
+    let p = NSOpenPanel()
+    p.canChooseDirectories = true
+    p.canChooseFiles = false
+    p.allowsMultipleSelection = true
+    p.prompt = L("Ekle", "Add")
+    p.message = L("UzPort bu klasörlerdeki projeleri bulup başlatabilir.", "UzPort will find and launch projects in these folders.")
+    if p.runModal() == .OK {
+        let new = p.urls.map(\.path).filter { !ProcessManager.shared.roots.contains($0) }
+        ProcessManager.shared.roots += new
+    }
 }

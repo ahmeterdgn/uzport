@@ -11,6 +11,7 @@ struct PortItem: Identifiable, Hashable {
     var dockerName: String?
     var dockerImage: String?
     var extraPorts: [UInt16] = []
+    var managedID: UUID?
 
     var id: String { "\(socket.pid):\(socket.port)" }
     var port: UInt16 { socket.port }
@@ -47,6 +48,7 @@ final class PortStore: ObservableObject {
     @AppStorage("showSystem") var showSystem = false
     @AppStorage("showApps") var showApps = true
     @AppStorage("notify") var notify = true
+    @AppStorage("autoRestart") var autoRestart = false
 
     private var timer: Timer?
     private var knownIDs = Set<String>()
@@ -116,6 +118,23 @@ final class PortStore: ObservableObject {
             }
         }
         list = merged
+        // UzPort'un başlattığı sunuculara bağla (port, kabuğun alt sürecinde açılır).
+        let pm = ProcessManager.shared
+        var parentCache: [pid_t: pid_t] = [:]
+        for i in list.indices where list[i].cls.category == .dev || list[i].cls.category == .docker || list[i].cls.category == .services {
+            if let s = pm.owner(ofPID: list[i].pid, parents: { p in
+                if let c = parentCache[p] { return c }
+                let r = ProcessDetails.read(p)?.parentPID ?? 0
+                parentCache[p] = r
+                return r
+            }) {
+                list[i].managedID = s.id
+                if list[i].cls.projectName == nil { list[i].cls.projectName = s.project.name }
+                if list[i].cls.projectPath == nil { list[i].cls.projectPath = s.project.path }
+                if list[i].cls.category != .dev { list[i].cls.category = .dev }
+                if s.state == .starting { s.state = .running }
+            }
+        }
         let ids = Set(list.map(\.id))
         if !firstScan {
             for it in list where !knownIDs.contains(it.id) && it.cls.category == .dev { announce(it) }

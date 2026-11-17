@@ -112,3 +112,49 @@ final class PortCoreTests: XCTestCase {
         }
     }
 }
+
+final class ProjectScannerTests: XCTestCase {
+    var root = ""
+
+    override func setUpWithError() throws {
+        root = NSTemporaryDirectory() + "uzport-proj-\(UUID().uuidString)"
+        let fm = FileManager.default
+        func write(_ rel: String, _ s: String) throws {
+            let p = root + "/" + rel
+            try fm.createDirectory(atPath: (p as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try s.write(toFile: p, atomically: true, encoding: .utf8)
+        }
+        try write("web/package.json", #"{"name":"moon-web","scripts":{"dev":"vite","build":"vite build","lint":"eslint .","test":"vitest","dev:server":"nodemon server.js"},"devDependencies":{"vite":"5"}}"#)
+        try write("web/pnpm-lock.yaml", "")
+        try write("api/artisan", "")
+        try write("api/composer.json", "{}")
+        try write("site/manage.py", "")
+        try write("stack/docker-compose.yml", "services: {}")
+        try write("lib/package.json", #"{"name":"just-lib","scripts":{"build":"tsc"}}"#)
+        try write("web/node_modules/x/package.json", #"{"name":"x","scripts":{"dev":"vite"}}"#)
+    }
+
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(atPath: root) }
+
+    func testFindsRunnableProjects() {
+        let ps = ProjectScanner.scan(roots: [root])
+        let byName = Dictionary(uniqueKeysWithValues: ps.map { ($0.name, $0) })
+        XCTAssertEqual(byName["moon-web"]?.defaultCommand?.command, "pnpm run dev")
+        XCTAssertEqual(byName["moon-web"]?.kindName, "Vite")
+        XCTAssertEqual(byName["moon-web"]?.commands.map(\.label), ["dev", "dev:server"], "build/lint/test sunucu değildir")
+        XCTAssertEqual(byName["api"]?.defaultCommand?.command, "php artisan serve")
+        XCTAssertEqual(byName["site"]?.defaultCommand?.command, "python3 manage.py runserver")
+        XCTAssertEqual(byName["stack"]?.defaultCommand?.command, "docker compose up")
+        XCTAssertNil(byName["just-lib"], "dev/start komutu olmayan kütüphane listelenmemeli")
+        XCTAssertNil(byName["x"], "node_modules taranmamalı")
+    }
+
+    func testANSIStripAndURLDetection() {
+        let line = "  \u{1B}[32m➜\u{1B}[39m  \u{1B}[1mLocal\u{1B}[22m:   \u{1B}[36mhttp://localhost:\u{1B}[1m5173\u{1B}[22m/\u{1B}[39m\r"
+        let clean = ANSI.strip(line)
+        XCTAssertEqual(clean, "  ➜  Local:   http://localhost:5173/")
+        XCTAssertEqual(ANSI.detectURL(clean)?.absoluteString, "http://localhost:5173/")
+        XCTAssertEqual(ANSI.detectURL("Server running on http://0.0.0.0:8000")?.absoluteString, "http://localhost:8000")
+        XCTAssertNil(ANSI.detectURL("see https://example.com"))
+    }
+}
